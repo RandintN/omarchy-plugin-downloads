@@ -10,7 +10,7 @@ RestartSec=3s
 KillMode=control-group
 MemoryHigh=512M
 MemoryMax=1G
-TasksMax=64
+TasksMax=256
 TimeoutStopSec=10s
 
 [Install]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { mkdirSync, existsSync, chmodSync, unlinkSync } from "node:fs";
+import { mkdirSync, existsSync, chmodSync, unlinkSync, statfsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Subprocess } from "bun";
 import { DownloadManager, isGenericStreamTitle, type DownloadItem } from "./download-manager-core";
@@ -7,6 +7,8 @@ import { DownloadManager, isGenericStreamTitle, type DownloadItem } from "./down
 const USER_NAME = Bun.env.USER || (Bun.env.HOME ? Bun.env.HOME.split("/").pop() : "") || "user";
 const RUNTIME_DIR = Bun.env.XDG_RUNTIME_DIR || join(Bun.env.HOME || "", ".local/run");
 const THUMBNAILS_DIR = join("/tmp", USER_NAME, "omarchy-thumbnails");
+const STAGING_DIR = join("/tmp", USER_NAME, "omarchy-downloads-staging");
+const YTDLP_CACHE_DIR = join("/tmp", USER_NAME, "omarchy-ytdlp-cache");
 const SOCKET_PATH = join(RUNTIME_DIR, "omarchy-ytdlp.sock");
 const DOWNLOAD_DIR = Bun.env.OMARCHY_YTDLP_DIR || join(Bun.env.HOME || "", "Videos");
 const MAX_CONCURRENT_DOWNLOADS = 3;
@@ -16,6 +18,12 @@ try { chmodSync(RUNTIME_DIR, 0o700); } catch {}
 
 mkdirSync(THUMBNAILS_DIR, { recursive: true, mode: 0o700 });
 try { chmodSync(THUMBNAILS_DIR, 0o700); } catch {}
+
+mkdirSync(STAGING_DIR, { recursive: true, mode: 0o700 });
+try { chmodSync(STAGING_DIR, 0o700); } catch {}
+
+mkdirSync(YTDLP_CACHE_DIR, { recursive: true, mode: 0o700 });
+try { chmodSync(YTDLP_CACHE_DIR, 0o700); } catch {}
 
 if (existsSync(SOCKET_PATH)) {
   try { unlinkSync(SOCKET_PATH); } catch {}
@@ -60,15 +68,29 @@ function processNextInQueue() {
   }
 }
 
+function cleanStagingDir() {
+  if (activeProcesses.size === 0 && existsSync(STAGING_DIR)) {
+    try {
+      const files = readdirSync(STAGING_DIR);
+      for (const file of files) {
+        try { unlinkSync(join(STAGING_DIR, file)); } catch {}
+      }
+    } catch {}
+  }
+}
+
 function onSlotReleased() {
   if (activeCount > 0) activeCount--;
   processNextInQueue();
 
-  // Quando a fila esvazia por completo, limpa buffers e devolve páginas de RAM ao kernel
+  // Quando a fila esvazia por completo, limpa resíduos de staging e devolve páginas de RAM ao kernel
   if (activeCount === 0) {
     const hasQueued = manager.getItems().some(i => i.status === "queued");
-    if (!hasQueued && typeof Bun.gc === "function") {
-      Bun.gc(true);
+    if (!hasQueued) {
+      cleanStagingDir();
+      if (typeof Bun.gc === "function") {
+        Bun.gc(true);
+      }
     }
   }
 }
@@ -160,6 +182,15 @@ function startDownloadProcess(item: DownloadItem) {
 
   mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
+  let useTmpStaging = false;
+  try {
+    const stats = statfsSync("/tmp");
+    const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+    if (freeBytes > 2 * 1024 * 1024 * 1024) {
+      useTmpStaging = true;
+    }
+  } catch {}
+
   const hasCustomTitle = !isGenericStreamTitle(item.title);
   const outputTemplate = hasCustomTitle ? `${item.title.replace(/[\/\\?%*:|"<>]/g, "_")}.%(ext)s` : "%(title)s.%(ext)s";
 
@@ -171,7 +202,8 @@ function startDownloadProcess(item: DownloadItem) {
     "--progress",
     "--newline",
     "--progress-template", "OMARCHY_PROG\t%(progress._percent_str)s",
-    "--paths", DOWNLOAD_DIR,
+    "--cache-dir", YTDLP_CACHE_DIR,
+    ...(useTmpStaging ? ["--paths", `home:${DOWNLOAD_DIR}`, "--paths", `temp:${STAGING_DIR}`] : ["--paths", DOWNLOAD_DIR]),
     "-o", outputTemplate
   ];
 
@@ -293,7 +325,7 @@ function startDownloadProcess(item: DownloadItem) {
           }
         }
         manager.updateItem(item.id, { status: "completed", percent: 100, title });
-        notifyCompletion(filepath, title, item.id);
+        await notifyCompletion(filepath, title, item.id);
       } else {
         const isNoVideo = !startNotified || /unsupported url|no video formats found|is not a valid url|generic information extractor/i.test(stderrText);
         const errorMessage = isNoVideo ? "No video found" : "Download failed";
@@ -315,11 +347,16 @@ function startDownloadProcess(item: DownloadItem) {
 function runFfmpegThumb(filepath: string, preview: string, ss: string): Promise<number> {
   return new Promise((resolve) => {
     let stderrText = "";
-    const ff = Bun.spawn([
-      "ffmpeg", "-y", "-ss", ss, "-i", filepath, "-vframes", "1",
-      "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=256:256", "-q:v", "2",
-      preview, "-loglevel", "error"
-    ], { stderr: "pipe" });
+    const args = [
+      "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+      "-ss", ss, "-i", filepath,
+      "-threads", "1",
+      "-an", "-sn", "-frames:v", "1", "-update", "1",
+      "-vf", "scale=256:256:force_original_aspect_ratio=increase,crop=256:256,format=yuvj420p",
+      "-q:v", "2",
+      preview
+    ];
+    const ff = Bun.spawn(args, { stderr: "pipe" });
     (async () => {
       if (ff.stderr) {
         const r = ff.stderr.getReader();
@@ -348,6 +385,9 @@ async function notifyCompletion(filepath: string | undefined, title: string, id:
   if (notifiedCompletions.has(id)) return;
   notifiedCompletions.add(id);
 
+  // Aguarda 350ms para garantir flush do VFS do kernel após a movimentação entre tmpfs e disco
+  await Bun.sleep(350);
+
   const preview = join(THUMBNAILS_DIR, `${id}.jpg`);
   const safeTitle = (title || "Downloaded video").replace(/^-+/, " ");
 
@@ -364,8 +404,8 @@ async function notifyCompletion(filepath: string | undefined, title: string, id:
   }
 
   // Gera uma única miniatura padronizada em /tmp/<user>/omarchy-thumbnails/
-  // (fallback para timestamp inicial se o frame de 6s não existir)
-  let code = await runFfmpegThumb(filepath, preview, "00:00:06.000");
+  // (fallback para timestamp inicial se o frame de 3s não existir)
+  let code = await runFfmpegThumb(filepath, preview, "00:00:03.000");
   if (code !== 0 || !existsSync(preview)) {
     code = await runFfmpegThumb(filepath, preview, "00:00:00.500");
   }
@@ -487,6 +527,7 @@ function gracefulShutdown() {
       try { proc.kill(15); } catch {}
     }
     server.stop();
+    cleanStagingDir();
     if (existsSync(SOCKET_PATH)) {
       unlinkSync(SOCKET_PATH);
     }
@@ -498,7 +539,8 @@ process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);
 
 console.log(`Omarchy Download Manager Daemon rodando em ${SOCKET_PATH}`);
- 
+
+cleanStagingDir();
 manager.loadStateSync();
 for (const item of manager.getItems()) {
   if (item.status === "downloading") {
