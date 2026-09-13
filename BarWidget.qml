@@ -11,10 +11,9 @@ BarWidget {
   property var downloads: []
   property int activeCount: 0
   property bool hasRecentFinished: false
-  // Mantém o ícone visível por 1h após o último item concluir/falhar,
-  // permitindo revisar o resultado e usar o botão Clear
+  // Keep the icon visible for 1h after the last item completes/fails,
+  // allowing result review and clearing via the Clear button
   readonly property int recentFinishedWindowMs: 60 * 60 * 1000
-
   function updateData(raw) {
     try {
       if (!raw) {

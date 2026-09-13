@@ -196,7 +196,7 @@ Panel {
                   }
                 }
 
-                // Botão remover com tamanho mínimo de toque de 32x32px
+                // Remove button with minimum touch target size of 32x32px
                 Item {
                   width: 32
                   height: 32
