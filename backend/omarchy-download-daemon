@@ -318,11 +318,18 @@ function runFfmpegThumb(filepath: string, preview: string, ss: string): Promise<
     const ff = Bun.spawn([
       "ffmpeg", "-y", "-ss", ss, "-i", filepath, "-vframes", "1",
       "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=256:256", "-q:v", "2",
-      preview, "-loglevel", "quiet"
+      preview, "-loglevel", "error"
     ], { stderr: "pipe" });
     (async () => {
-      const r = ff.stderr!.getReader();
-      while (true) { const { done, value } = await r.read(); if (done) break; stderrText += value; }
+      if (ff.stderr) {
+        const r = ff.stderr.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await r.read();
+          if (done) break;
+          stderrText += decoder.decode(value, { stream: true });
+        }
+      }
     })();
     ff.exited.then((code) => {
       if (code !== 0 || !existsSync(preview)) {
@@ -362,20 +369,23 @@ async function notifyCompletion(filepath: string | undefined, title: string, id:
   if (code !== 0 || !existsSync(preview)) {
     code = await runFfmpegThumb(filepath, preview, "00:00:00.500");
   }
-  const imageArg = existsSync(preview) ? preview : filepath;
-  dispatchNotification(imageArg, safeTitle, filepath);
+  const previewExists = existsSync(preview);
+  dispatchNotification(previewExists ? preview : undefined, safeTitle, filepath);
 }
 
-function dispatchNotification(imageArg: string, safeTitle: string, filepath: string) {
-  Bun.spawn([
+function dispatchNotification(imageArg: string | undefined, safeTitle: string, filepath: string) {
+  const args = [
     "omarchy-notification-send",
     "-g", "󰄬",
     "Download complete",
     safeTitle,
-    "-t", "10000",
-    "--image", imageArg,
-    "--exec", "mpv", "--", filepath
-  ]);
+    "-t", "10000"
+  ];
+  if (imageArg) {
+    args.push("--image", imageArg);
+  }
+  args.push("--exec", "mpv", "--", filepath);
+  Bun.spawn(args);
 }
 
 function handleCommand(msg: { action: string; url?: string; id?: string; referer?: string; title?: string }) {

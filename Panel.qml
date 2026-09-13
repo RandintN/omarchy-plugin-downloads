@@ -191,7 +191,7 @@ Panel {
                     id: percentText
                     anchors.right: parent.right
                     text: modelData.status === "completed" ? "󰄬" : (modelData.status === "failed" ? "󰅚" : (modelData.status === "queued" ? "Queued" : (Math.round(modelData.percent || 0).toLocaleString(Qt.locale(), 'f', 0) + "%")))
-                    color: modelData.status === "failed" ? Color.urgent : (modelData.status === "completed" ? Color.accent : Color.subtext)
+                    color: modelData.status === "failed" ? Color.urgent : (modelData.status === "completed" ? Color.accent : Color.muted)
                     font.pixelSize: Style.font.caption
                   }
                 }
@@ -216,7 +216,7 @@ Panel {
                     anchors.centerIn: parent
                     text: "󰅖"
                     font.pixelSize: Style.font.body
-                    color: removeHover.hovered ? Color.urgent : Color.subtext
+                    color: removeHover.hovered ? Color.urgent : Color.muted
                     opacity: (itemHover.hovered || delegateRoot.activeFocus) ? 1.0 : 0.35
                   }
 
@@ -258,7 +258,7 @@ Panel {
                   text: modelData.status === "downloading" ? "" : (modelData.status === "completed" ? "Completed" : (modelData.error || "Failed"))
                   textFormat: Text.PlainText
                   font.pixelSize: Style.font.caption
-                  color: modelData.status === "failed" ? Color.urgent : Color.subtext
+                  color: modelData.status === "failed" ? Color.urgent : Color.muted
                   visible: modelData.status !== "downloading"
                   Layout.fillWidth: true
                 }
@@ -306,7 +306,7 @@ Panel {
         Text {
           text: "No recent downloads"
           visible: root.downloadsList.length === 0
-          color: Color.subtext
+          color: Color.muted
           font.pixelSize: Style.font.body
           horizontalAlignment: Text.AlignHCenter
           width: parent.width

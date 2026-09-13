@@ -85,7 +85,6 @@ BarWidget {
       if (root.bar && typeof root.bar.hideTooltip === "function") {
         root.bar.hideTooltip(button)
       }
-      root.close()
     }
   }
 
