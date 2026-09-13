@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# omarchy:summary=Native messaging host: download the URL sent by the yt-dlp Chromium extension
+# omarchy:hidden=true
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+
+export OMARCHY_PATH="${OMARCHY_PATH:-$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)}"
+export PATH="$HOME/.local/bin:$OMARCHY_PATH/bin:/usr/local/bin:/usr/bin:$PATH"
+
+parse_url() {
+  jq -r '.url // empty' 2>/dev/null <<<"$1" || true
+}
+
+valid_url() {
+  local url=$1
+
+  # Valida esquema http/https e rejeita caracteres de controle (\n, \r, \t)
+  [[ $url =~ ^https?:// ]] || return 1
+  [[ $url != *$'\n'* && $url != *$'\r'* && $url != *$'\t'* ]] || return 1
+
+  # Remove credenciais e extrai host/porta com sanitização de colchetes IPv6
+  # (case-insensitive para não deixar escapar variações de caixa como LOCALHOST)
+  local host_part
+  host_part=$(echo "$url" | sed -E 's|^https?://([^/@]+@)?([^/:]+).*|\2|i' | tr -d '[]' | tr '[:upper:]' '[:lower:]')
+
+  # Rejeita chamadas para localhost, loopback e endereços IP de rede privada/local e IPv6
+  # (inclui IPv4-mapped IPv6 do tipo ::ffff:127.0.0.1)
+  if [[ $host_part =~ ^(localhost|127\.[0-9]+\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+|169\.254\.[0-9]+\.[0-9]+|0\.0\.0\.0|::1|::ffff:(127|0)\.[0-9.]+|fe80::.*|fc00::.*)$ ]]; then
+    return 1
+  fi
+
+  # Bloqueia representações numéricas puras (decimal, octal, hex)
+  if [[ $host_part =~ ^0x[0-9a-fA-F]+$ || $host_part =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+main() {
+  local length payload url
+
+  length=$(head -c4 | od -An -v -tu4 --endian=little | tr -d ' ')
+  [[ -n ${length:-} ]] && ((length > 0)) || exit 0
+
+  payload=$(head -c "$length")
+
+  # Pop-up OSD imediato indicando análise da página (usando media para largura expandida sem corte)
+  omarchy-osd -i "media" -m "Analyzing page for a valid video" -d 2500 >/dev/null 2>&1 &
+
+  # Ack com objeto vazio para o Chromium fechar o callback
+  printf '\x02\x00\x00\x00{}'
+
+  url=$(parse_url "$payload")
+  [[ -n $url ]] || exit 0
+  valid_url "$url" || exit 0
+
+  local referer title
+  referer=$(jq -r '.referer // empty' 2>/dev/null <<<"$payload" || true)
+  title=$(jq -r '.title // empty' 2>/dev/null <<<"$payload" || true)
+
+  # Monta argumentos com segurança
+  local cmd=(omarchy-download-manager --add "$url")
+  if [[ -n $referer ]]; then
+    cmd+=(--referer "$referer")
+  fi
+  if [[ -n $title ]]; then
+    cmd+=(--title "$title")
+  fi
+
+  # Adiciona ao gerenciador de downloads
+  "${cmd[@]}" </dev/null >/dev/null 2>&1 &
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

@@ -1,0 +1,70 @@
+#!/usr/bin/env bun
+import { join } from "node:path";
+import { connect } from "node:net";
+
+const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || join(process.env.HOME || "", ".local/run");
+const SOCKET_PATH = join(RUNTIME_DIR, "omarchy-ytdlp.sock");
+
+let payload: Record<string, string> | null = null;
+const VALID_ID_REGEX = /^[0-9a-z]+$/i;
+
+const args = Bun.argv.slice(2);
+const command = args[0];
+
+if (command === "--add" && args[1]) {
+  const url = args[1];
+  let referer: string | undefined;
+  let title: string | undefined;
+
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === "--referer" && args[i + 1]) {
+      referer = args[i + 1];
+      i++;
+    } else if (args[i] === "--title" && args[i + 1]) {
+      title = args[i + 1];
+      i++;
+    }
+  }
+
+  if (url.includes("simulate")) {
+    payload = { action: "add", url, ...(referer ? { referer } : {}), ...(title ? { title } : {}) };
+  } else {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        payload = { action: "add", url, ...(referer ? { referer } : {}), ...(title ? { title } : {}) };
+      }
+    } catch {}
+  }
+} else if (command === "--remove" && args[1] && VALID_ID_REGEX.test(args[1])) {
+  payload = { action: "remove", id: args[1] };
+} else if (command === "--clear") {
+  payload = { action: "clear" };
+} else if (command === "--cancel" && args[1] && VALID_ID_REGEX.test(args[1])) {
+  payload = { action: "cancel", id: args[1] };
+}
+
+if (!payload) {
+  console.log("Omarchy download manager client.");
+  process.exit(0);
+}
+
+const client = connect(SOCKET_PATH, () => {
+  client.write(JSON.stringify(payload) + "\n");
+});
+
+client.on("data", () => {
+  client.destroy();
+  process.exit(0);
+});
+
+client.on("error", (err) => {
+  console.error("Daemon offline:", err.message);
+  process.exit(1);
+});
+
+setTimeout(() => {
+  client.destroy();
+  process.exit(0);
+}, 1000);
+

@@ -1,0 +1,500 @@
+#!/usr/bin/env bun
+import { mkdirSync, existsSync, chmodSync, unlinkSync } from "node:fs";
+import { join, dirname } from "node:path";
+import type { Subprocess } from "bun";
+import { DownloadManager, isGenericStreamTitle, type DownloadItem } from "./download-manager-core";
+
+const USER_NAME = process.env.USER || (process.env.HOME ? process.env.HOME.split("/").pop() : "") || "user";
+const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || join(process.env.HOME || "", ".local/run");
+const THUMBNAILS_DIR = join("/tmp", USER_NAME, "omarchy-thumbnails");
+const SOCKET_PATH = join(RUNTIME_DIR, "omarchy-ytdlp.sock");
+const DOWNLOAD_DIR = process.env.OMARCHY_YTDLP_DIR || join(process.env.HOME || "", "Videos");
+const MAX_CONCURRENT_DOWNLOADS = 3;
+
+mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+try { chmodSync(RUNTIME_DIR, 0o700); } catch {}
+
+mkdirSync(THUMBNAILS_DIR, { recursive: true, mode: 0o700 });
+try { chmodSync(THUMBNAILS_DIR, 0o700); } catch {}
+
+if (existsSync(SOCKET_PATH)) {
+  try { unlinkSync(SOCKET_PATH); } catch {}
+}
+
+const manager = new DownloadManager();
+const activeProcesses = new Map<string, Subprocess>();
+const activeSimulations = new Map<string, any>();
+const notifiedCompletions = new Set<string>();
+let activeCount = 0;
+
+const VALID_ID_REGEX = /^[0-9a-z]+$/i;
+
+function isValidUrl(rawUrl: string): boolean {
+  if (rawUrl.includes("simulate")) return true;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    // Bloqueia loopback/privados, incluindo IPv4-mapped IPv6 (::ffff:127.x, ::ffff:0.x)
+    const blocked = /^(localhost|127\.[0-9.]+|10\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|192\.168\.[0-9.]+|169\.254\.[0-9.]+|0\.0\.0\.0|::1|::ffff:(127|0)\.[0-9.]+)$/;
+    return !blocked.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function processNextInQueue() {
+  if (activeCount >= MAX_CONCURRENT_DOWNLOADS) return;
+  manager.loadStateSync();
+  const items = manager.getItems();
+  const nextItem = items.find(i => i.status === "queued");
+  if (!nextItem) return;
+
+  activeCount++;
+  manager.updateItem(nextItem.id, { status: "downloading" });
+
+  if (nextItem.url.includes("simulate")) {
+    startSimulatedDownload(nextItem);
+  } else {
+    startDownloadProcess(nextItem);
+  }
+}
+
+function onSlotReleased() {
+  if (activeCount > 0) activeCount--;
+  processNextInQueue();
+
+  // Quando a fila esvazia por completo, limpa buffers e devolve páginas de RAM ao kernel
+  if (activeCount === 0) {
+    const hasQueued = manager.getItems().some(i => i.status === "queued");
+    if (!hasQueued && typeof Bun.gc === "function") {
+      Bun.gc(true);
+    }
+  }
+}
+
+function notifyStart(title: string) {
+  Bun.spawn([
+    "omarchy-osd",
+    "-i", "media-play",
+    "-m", "Starting video download",
+    "-d", "2500"
+  ]);
+
+  const safeTitle = (title || "Starting download...").replace(/^-+/, " ");
+  Bun.spawn([
+    "omarchy-notification-send",
+    "-g", "󰇚",
+    "Download started",
+    safeTitle,
+    "-t", "4000"
+  ]);
+}
+
+function notifyNoVideoFound(reason?: string) {
+  Bun.spawn([
+    "omarchy-osd",
+    "-i", "media",
+    "-m", "No valid video found",
+    "-d", "2500"
+  ]);
+
+  const detail = reason || "Could not find valid media on page.";
+  Bun.spawn([
+    "omarchy-notification-send",
+    "-g", "󰅚",
+    "-u", "normal",
+    "No valid video found",
+    detail,
+    "-t", "6000"
+  ]);
+}
+
+function startSimulatedDownload(item: DownloadItem) {
+  manager.loadStateSync();
+  const currentItem = manager.getItem(item.id) || item;
+  if (currentItem.status === "completed" || currentItem.status === "failed") {
+    onSlotReleased();
+    return;
+  }
+
+  notifyStart(item.title || "Simulated Video");
+  let currentPct = 0;
+  const interval = setInterval(() => {
+    manager.loadStateSync();
+    const latest = manager.getItem(item.id);
+
+    if (!latest || latest.status === "failed") {
+      clearInterval(interval);
+      activeSimulations.delete(item.id);
+      onSlotReleased();
+      return;
+    }
+
+    currentPct += 5;
+    manager.updateItem(item.id, { percent: currentPct });
+
+    if (currentPct >= 100) {
+      clearInterval(interval);
+      activeSimulations.delete(item.id);
+      manager.updateItem(item.id, {
+        status: "completed",
+        percent: 100,
+        title: latest.title || "Simulated Video Completed",
+        completedAt: Date.now()
+      });
+      onSlotReleased();
+    }
+  }, 600);
+
+  activeSimulations.set(item.id, interval);
+}
+
+function startDownloadProcess(item: DownloadItem) {
+  manager.loadStateSync();
+  const currentItem = manager.getItem(item.id) || item;
+  if (currentItem.status === "completed" || currentItem.status === "failed") {
+    onSlotReleased();
+    return;
+  }
+
+  mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+  const hasCustomTitle = !isGenericStreamTitle(item.title);
+  const outputTemplate = hasCustomTitle ? `${item.title.replace(/[\/\\?%*:|"<>]/g, "_")}.%(ext)s` : "%(title)s.%(ext)s";
+
+  const ytdlpArgs = [
+    "yt-dlp",
+    // --playlist-items 1: para URLs de playlist, baixa somente o primeiro item
+    "--playlist-items", "1",
+    "--no-warnings",
+    "--progress",
+    "--newline",
+    "--progress-template", "OMARCHY_PROG\t%(progress._percent_str)s",
+    "--paths", DOWNLOAD_DIR,
+    "-o", outputTemplate
+  ];
+
+  if (item.referer) {
+    ytdlpArgs.push("--referer", item.referer);
+  }
+
+  ytdlpArgs.push(
+    "--print", "OMARCHY_TITLE\t%(title)j",
+    "--print", "after_move:OMARCHY_FILE\t%(filepath)s",
+    "--",
+    item.url
+  );
+
+  const proc = Bun.spawn(ytdlpArgs, {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...Bun.env, PYTHONUNBUFFERED: "1" }
+  });
+
+  activeProcesses.set(item.id, proc);
+  let startNotified = false;
+
+  (async () => {
+    let stderrText = "";
+    if (proc.stderr) {
+      (async () => {
+        const reader = proc.stderr.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          stderrText += decoder.decode(value, { stream: true });
+        }
+      })();
+    }
+
+    try {
+      if (proc.stdout) {
+        const reader = proc.stdout.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("OMARCHY_TITLE\t")) {
+              let title = line.replace("OMARCHY_TITLE\t", "").trim();
+              try { title = JSON.parse(title); } catch {}
+              if (hasCustomTitle) {
+                title = item.title;
+              } else if (isGenericStreamTitle(title)) {
+                title = item.title && !isGenericStreamTitle(item.title) ? item.title : "Downloaded video";
+              }
+              manager.updateItem(item.id, { title });
+              if (!startNotified) {
+                startNotified = true;
+                notifyStart(title);
+              }
+            } else if (line.startsWith("OMARCHY_PROG\t")) {
+              const rawPct = line.replace("OMARCHY_PROG\t", "").trim();
+              const cleanPct = parseFloat(rawPct.replace("%", "").trim()) || 0;
+              const percent = Math.min(100, Math.max(0, Math.round(cleanPct)));
+
+              // Throttle de I/O: o daemon é o único escritor do estado, então usa
+              // o mapa em memória (sem read síncrono por linha) e só toca o disco
+              // quando o percent inteiro ou o título efetivamente mudam — limitando
+              // as reescritas do JSON a ~100 por download, independentes da taxa
+              // de linhas do yt-dlp (que dispara o FileView do QML a cada write).
+              const latest = manager.getItem(item.id);
+              if (latest && latest.status === "downloading") {
+                const currentTitle = isGenericStreamTitle(latest.title) ? (hasCustomTitle ? item.title : "Downloading video...") : latest.title;
+                if (!startNotified) {
+                  startNotified = true;
+                  notifyStart(currentTitle);
+                }
+                if (latest.percent !== percent || latest.title !== currentTitle) {
+                  manager.updateItem(item.id, {
+                    percent,
+                    title: currentTitle
+                  });
+                }
+              }
+            } else if (line.startsWith("OMARCHY_FILE\t")) {
+              const filepath = line.replace("OMARCHY_FILE\t", "").trim();
+              manager.updateItem(item.id, { filepath });
+            }
+          }
+        }
+      }
+
+      const code = await proc.exited;
+      activeProcesses.delete(item.id);
+
+      manager.loadStateSync();
+      const latest = manager.getItem(item.id);
+      if (latest && latest.status === "failed") {
+        return;
+      }
+
+      if (code === 0 && (latest?.filepath || (latest?.percent && latest.percent >= 99))) {
+        const filepath = latest?.filepath;
+        let title = latest?.title;
+        if (hasCustomTitle) {
+          title = item.title;
+        } else if (isGenericStreamTitle(title)) {
+          if (filepath) {
+            const filename = filepath.split("/").pop() || "";
+            const nameWithoutExt = filename.replace(/\.[^/.]+$/, "");
+            title = !isGenericStreamTitle(nameWithoutExt) ? nameWithoutExt : "Downloaded video";
+          } else {
+            title = "Downloaded video";
+          }
+        }
+        manager.updateItem(item.id, { status: "completed", percent: 100, title });
+        notifyCompletion(filepath, title, item.id);
+      } else {
+        const isNoVideo = !startNotified || /unsupported url|no video formats found|is not a valid url|generic information extractor/i.test(stderrText);
+        const errorMessage = isNoVideo ? "No video found" : "Download failed";
+        manager.updateItem(item.id, { status: "failed", error: errorMessage });
+        if (isNoVideo) {
+          notifyNoVideoFound();
+        }
+      }
+    } catch (e) {
+      console.error("Erro no processo de download:", e);
+      manager.updateItem(item.id, { status: "failed", error: "Download error" });
+    } finally {
+      activeProcesses.delete(item.id);
+      onSlotReleased();
+    }
+  })();
+}
+
+function runFfmpegThumb(filepath: string, preview: string, ss: string): Promise<number> {
+  return new Promise((resolve) => {
+    let stderrText = "";
+    const ff = Bun.spawn([
+      "ffmpeg", "-y", "-ss", ss, "-i", filepath, "-vframes", "1",
+      "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=256:256", "-q:v", "2",
+      preview, "-loglevel", "quiet"
+    ], { stderr: "pipe" });
+    (async () => {
+      const r = ff.stderr!.getReader();
+      while (true) { const { done, value } = await r.read(); if (done) break; stderrText += value; }
+    })();
+    ff.exited.then((code) => {
+      if (code !== 0 || !existsSync(preview)) {
+        console.error(`[thumbnails] ffmpeg falhou (code=${code}) para ${filepath}: ${stderrText.slice(-300)}`);
+      }
+      resolve(code);
+    }).catch((e) => {
+      console.error(`[thumbnails] ffmpeg spawn falhou: ${e.message}`);
+      resolve(-1);
+    });
+  });
+}
+
+async function notifyCompletion(filepath: string | undefined, title: string, id: string) {
+  if (!filepath) return;
+  if (notifiedCompletions.has(id)) return;
+  notifiedCompletions.add(id);
+
+  const preview = join(THUMBNAILS_DIR, `${id}.jpg`);
+  const safeTitle = (title || "Downloaded video").replace(/^-+/, " ");
+
+  // Limpa eventuais miniaturas criadas no mesmo diretório do vídeo
+  const lastDot = filepath.lastIndexOf(".");
+  if (lastDot > 0) {
+    const baseName = filepath.substring(0, lastDot);
+    for (const ext of [".jpg", ".webp", ".png", ".jpeg"]) {
+      const candidate = `${baseName}${ext}`;
+      if (candidate !== filepath && existsSync(candidate)) {
+        try { unlinkSync(candidate); } catch {}
+      }
+    }
+  }
+
+  // Gera uma única miniatura padronizada em /tmp/<user>/omarchy-thumbnails/
+  // (fallback para timestamp inicial se o frame de 6s não existir)
+  let code = await runFfmpegThumb(filepath, preview, "00:00:06.000");
+  if (code !== 0 || !existsSync(preview)) {
+    code = await runFfmpegThumb(filepath, preview, "00:00:00.500");
+  }
+  const imageArg = existsSync(preview) ? preview : filepath;
+  dispatchNotification(imageArg, safeTitle, filepath);
+}
+
+function dispatchNotification(imageArg: string, safeTitle: string, filepath: string) {
+  Bun.spawn([
+    "omarchy-notification-send",
+    "-g", "󰄬",
+    "Download complete",
+    safeTitle,
+    "-t", "10000",
+    "--image", imageArg,
+    "--exec", "mpv", "--", filepath
+  ]);
+}
+
+function handleCommand(msg: { action: string; url?: string; id?: string; referer?: string; title?: string }) {
+  if (msg.action === "add" && typeof msg.url === "string") {
+    if (!isValidUrl(msg.url)) return;
+    const initialStatus = activeCount < MAX_CONCURRENT_DOWNLOADS ? "downloading" : "queued";
+    const id = manager.addDownload(msg.url, msg.title, initialStatus, msg.referer);
+    const item = manager.getItem(id);
+
+    // Se já estiver sendo processado, não duplica a execução
+    if (activeProcesses.has(id) || activeSimulations.has(id)) {
+      return;
+    }
+
+    if (item && item.status === "completed" && item.filepath && existsSync(item.filepath)) {
+      Bun.spawn([
+        "omarchy-osd",
+        "-i", "media",
+        "-m", "Video already downloaded",
+        "-d", "2500"
+      ]);
+      return;
+    }
+
+    if (item && item.status === "completed") {
+      return;
+    }
+
+    if (item && item.status === "downloading") {
+      if (activeCount >= MAX_CONCURRENT_DOWNLOADS) {
+        manager.updateItem(item.id, { status: "queued" });
+        return;
+      }
+      activeCount++;
+      if (msg.url.includes("simulate")) startSimulatedDownload(item);
+      else startDownloadProcess(item);
+    }
+  } else if (msg.action === "remove" && typeof msg.id === "string") {
+    if (!VALID_ID_REGEX.test(msg.id)) return;
+    notifiedCompletions.delete(msg.id);
+    manager.removeItem(msg.id);
+  } else if (msg.action === "clear") {
+    notifiedCompletions.clear();
+    manager.clearCompleted();
+    if (typeof Bun.gc === "function") {
+      Bun.gc(true);
+    }
+  } else if (msg.action === "cancel" && typeof msg.id === "string") {
+    if (!VALID_ID_REGEX.test(msg.id)) return;
+    notifiedCompletions.delete(msg.id);
+    manager.cancelDownload(msg.id);
+
+    const timer = activeSimulations.get(msg.id);
+    if (timer) {
+      clearInterval(timer);
+      activeSimulations.delete(msg.id);
+      onSlotReleased();
+    }
+
+    const proc = activeProcesses.get(msg.id);
+    if (proc) {
+      proc.kill(9);
+      activeProcesses.delete(msg.id);
+      onSlotReleased();
+    }
+  }
+}
+
+const server = Bun.listen({
+  unix: SOCKET_PATH,
+  socket: {
+    data(socket, data) {
+      try {
+        const str = data.toString().trim();
+        for (const line of str.split("\n")) {
+          if (!line) continue;
+          const msg = JSON.parse(line);
+          if (typeof msg === "object" && msg !== null) {
+            handleCommand(msg);
+          }
+        }
+        socket.write(JSON.stringify({ ok: true }) + "\n");
+      } catch {
+        socket.write(JSON.stringify({ ok: false, error: "Invalid request" }) + "\n");
+      }
+    }
+  }
+});
+
+try { chmodSync(SOCKET_PATH, 0o600); } catch {}
+
+function gracefulShutdown() {
+  console.log("Encerrando Omarchy Download Manager Daemon...");
+  try {
+    for (const [id, timer] of activeSimulations.entries()) {
+      clearInterval(timer);
+    }
+    for (const [id, proc] of activeProcesses.entries()) {
+      try { proc.kill(15); } catch {}
+    }
+    server.stop();
+    if (existsSync(SOCKET_PATH)) {
+      unlinkSync(SOCKET_PATH);
+    }
+  } catch {}
+  process.exit(0);
+}
+
+process.on("SIGTERM", gracefulShutdown);
+process.on("SIGINT", gracefulShutdown);
+
+console.log(`Omarchy Download Manager Daemon rodando em ${SOCKET_PATH}`);
+ 
+manager.loadStateSync();
+for (const item of manager.getItems()) {
+  if (item.status === "downloading") {
+    manager.updateItem(item.id, { status: "queued" });
+  }
+}
+for (let i = 0; i < MAX_CONCURRENT_DOWNLOADS; i++) {
+  processNextInQueue();
+}

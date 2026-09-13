@@ -1,0 +1,17 @@
+[Unit]
+Description=Omarchy yt-dlp Download Manager Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/mise/installs/bun/1.4.2/bin/bun %h/.local/share/omarchy/bin/omarchy-download-daemon
+Restart=on-failure
+RestartSec=3s
+KillMode=control-group
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=64
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=default.target

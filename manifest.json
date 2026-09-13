@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "robson.downloads",
+  "name": "Downloads",
+  "version": "1.0.0",
+  "author": "Robson",
+  "license": "MIT",
+  "description": "Monitor e gerenciador de downloads via daemon systemd e yt-dlp.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Downloads",
+    "description": "Ícone na barra com visualização e controle de progresso de downloads em tempo real.",
+    "category": "Tools",
+    "aliases": ["downloads", "yt-dlp"],
+    "allowMultiple": false
+  }
+}
