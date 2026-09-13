@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Robson",
   "license": "MIT",
-  "description": "Monitor e gerenciador de downloads via daemon systemd e yt-dlp.",
+  "description": "Gerenciador de downloads yt-dlp autocontido com daemon Bun, Systemd e widget Quickshell.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
