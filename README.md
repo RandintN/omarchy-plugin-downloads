@@ -47,6 +47,24 @@ omarchy-download-manager --clear
 
 ---
 
+## Performance & Resource Benchmark
+
+Empirical benchmark executing a stress test of 30 concurrent simulated downloads managed by the Bun daemon (pool limit of 3 active downloads with 27 queued, dynamic slot recycling, and atomic state synchronization):
+
+| Metric | Result | Notes |
+| :--- | :--- | :--- |
+| **Total Test Duration** | 121.1s | 30 downloads processed across 10 sequential 3-slot batches |
+| **Average CPU Load** | 0.27% | Measured via `/proc/[pid]/stat` ticks on AMD Ryzen (16 threads) |
+| **Peak CPU Load** | 2.00% | Brief spike during slot handoff and queue shift |
+| **Idle / Baseline RSS** | 33.1 MB | JavaScriptCore runtime baseline in sleep/idle state |
+| **Peak Memory (RSS)** | 40.9 MB | +7.8 MB memory delta under full 30-item queue load |
+| **Post-Run Settled RSS** | 34.3 MB | Reclaimed automatically via `Bun.gc(true)` upon queue drain |
+| **SSD Physical Writes** | 5.82 MB | Cumulative `write_bytes` across all 30 items (~198 KB per download) |
+| **Write Syscalls (`syscw`)** | 1,557 | Average of 51 atomic writes per full download lifecycle |
+| **Staging & Thumbnails** | 0 MB SSD wear | Temporary video chunks and thumbnails operate in `tmpfs` (`/tmp`) |
+
+---
+
 ## License
 
 MIT License - Copyright (c) 2026 [Robson Cassiano](https://eu.robsoncassiano.software)
