@@ -4,11 +4,11 @@ import { join, dirname } from "node:path";
 import type { Subprocess } from "bun";
 import { DownloadManager, isGenericStreamTitle, type DownloadItem } from "./download-manager-core";
 
-const USER_NAME = process.env.USER || (process.env.HOME ? process.env.HOME.split("/").pop() : "") || "user";
-const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || join(process.env.HOME || "", ".local/run");
+const USER_NAME = Bun.env.USER || (Bun.env.HOME ? Bun.env.HOME.split("/").pop() : "") || "user";
+const RUNTIME_DIR = Bun.env.XDG_RUNTIME_DIR || join(Bun.env.HOME || "", ".local/run");
 const THUMBNAILS_DIR = join("/tmp", USER_NAME, "omarchy-thumbnails");
 const SOCKET_PATH = join(RUNTIME_DIR, "omarchy-ytdlp.sock");
-const DOWNLOAD_DIR = process.env.OMARCHY_YTDLP_DIR || join(process.env.HOME || "", "Videos");
+const DOWNLOAD_DIR = Bun.env.OMARCHY_YTDLP_DIR || join(Bun.env.HOME || "", "Videos");
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
 mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
@@ -358,7 +358,7 @@ async function notifyCompletion(filepath: string | undefined, title: string, id:
     for (const ext of [".jpg", ".webp", ".png", ".jpeg"]) {
       const candidate = `${baseName}${ext}`;
       if (candidate !== filepath && existsSync(candidate)) {
-        try { unlinkSync(candidate); } catch {}
+        try { await Bun.file(candidate).delete(); } catch {}
       }
     }
   }
