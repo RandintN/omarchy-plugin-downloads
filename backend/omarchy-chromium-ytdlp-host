@@ -42,9 +42,10 @@ valid_url() {
 
 main() {
   local length payload url
+  local MAX_NATIVE_MSG_BYTES=65536
 
   length=$(head -c4 | od -An -v -tu4 --endian=little | tr -d ' ')
-  [[ -n ${length:-} ]] && ((length > 0)) || exit 0
+  [[ -n ${length:-} ]] && ((length > 0 && length <= MAX_NATIVE_MSG_BYTES)) || exit 0
 
   payload=$(head -c "$length")
 
@@ -61,6 +62,8 @@ main() {
   local referer title
   referer=$(jq -r '.referer // empty' 2>/dev/null <<<"$payload" || true)
   title=$(jq -r '.title // empty' 2>/dev/null <<<"$payload" || true)
+  referer="${referer:0:4096}"
+  title="${title:0:512}"
 
   # Monta argumentos com segurança
   local cmd=(omarchy-download-manager --add "$url")

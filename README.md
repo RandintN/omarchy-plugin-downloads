@@ -63,6 +63,28 @@ Empirical benchmark executing a stress test of 30 concurrent simulated downloads
 | **Write Syscalls (`syscw`)** | 1,557 | Average of 51 atomic writes per full download lifecycle |
 | **Staging & Thumbnails** | 0 MB SSD wear | Temporary video chunks and thumbnails operate in `tmpfs` (`/tmp`) |
 
+## Removing
+
+To remove the Quickshell plugin:
+
+```bash
+omarchy plugin remove robson.downloads
+```
+
+To remove backend daemons and service configuration:
+
+```bash
+systemctl --user stop omarchy-download-manager.service
+systemctl --user disable omarchy-download-manager.service
+rm -f ~/.config/systemd/user/omarchy-download-manager.service
+rm -f ~/.local/bin/omarchy-download-manager ~/.local/bin/omarchy-chromium-ytdlp-host
+rm -f ~/.local/share/omarchy/bin/omarchy-download-daemon ~/.local/share/omarchy/bin/download-manager-core.ts
+rm -f ~/.config/chromium/NativeMessagingHosts/com.omarchy.ytdlp.json
+systemctl --user daemon-reload
+```
+
+State files (`~/.local/state/omarchy/downloads.json`) and downloaded video files are kept.
+
 ---
 
 ## License

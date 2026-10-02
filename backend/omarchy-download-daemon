@@ -36,6 +36,15 @@ const notifiedCompletions = new Set<string>();
 let activeCount = 0;
 
 const VALID_ID_REGEX = /^[0-9a-z]+$/i;
+const MAX_STDERR_BYTES = 65536;        // 64 KiB
+const MAX_LINE_BUFFER_BYTES = 65536;   // 64 KiB
+const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes absolute deadline
+
+function killProcessGroup(pid: number, signal: "TERM" | "KILL" = "TERM") {
+  try {
+    Bun.spawnSync(["kill", `-${signal}`, `-${pid}`]);
+  } catch {}
+}
 
 function isValidUrl(rawUrl: string): boolean {
   if (rawUrl.includes("simulate")) return true;
@@ -218,7 +227,8 @@ function startDownloadProcess(item: DownloadItem) {
     item.url
   );
 
-  const proc = Bun.spawn(ytdlpArgs, {
+  const spawnArgs = ["/usr/bin/setsid", "-w", ...ytdlpArgs];
+  const proc = Bun.spawn(spawnArgs, {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...Bun.env, PYTHONUNBUFFERED: "1" }
@@ -226,18 +236,36 @@ function startDownloadProcess(item: DownloadItem) {
 
   activeProcesses.set(item.id, proc);
   let startNotified = false;
+  let timedOut = false;
+
+  const deadlineTimer = setTimeout(() => {
+    timedOut = true;
+    console.warn(`[daemon] Download ${item.id} (PID ${proc.pid}) exceeded deadline of ${DOWNLOAD_TIMEOUT_MS}ms. Terminating process group.`);
+    killProcessGroup(proc.pid, "TERM");
+    setTimeout(() => {
+      killProcessGroup(proc.pid, "KILL");
+    }, 2000);
+  }, DOWNLOAD_TIMEOUT_MS);
 
   (async () => {
     let stderrText = "";
     if (proc.stderr) {
       (async () => {
-        const reader = proc.stderr.getReader();
-        const decoder = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          stderrText += decoder.decode(value, { stream: true });
-        }
+        try {
+          const reader = proc.stderr.getReader();
+          const decoder = new TextDecoder();
+          let accumulated = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (accumulated < MAX_STDERR_BYTES) {
+              const chunk = decoder.decode(value, { stream: true });
+              const allow = MAX_STDERR_BYTES - accumulated;
+              stderrText += chunk.slice(0, allow);
+              accumulated += chunk.length;
+            }
+          }
+        } catch {}
       })();
     }
 
@@ -252,10 +280,16 @@ function startDownloadProcess(item: DownloadItem) {
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
+          if (buffer.length > MAX_LINE_BUFFER_BYTES) {
+            console.warn(`[daemon] Unterminated stdout line exceeded ${MAX_LINE_BUFFER_BYTES} bytes. Truncating.`);
+            buffer = buffer.slice(-MAX_LINE_BUFFER_BYTES);
+          }
+
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
 
           for (const line of lines) {
+            if (line.length > MAX_LINE_BUFFER_BYTES) continue;
             if (line.startsWith("OMARCHY_TITLE\t")) {
               let title = line.replace("OMARCHY_TITLE\t", "").trim();
               try { title = JSON.parse(title); } catch {}
@@ -302,7 +336,13 @@ function startDownloadProcess(item: DownloadItem) {
       }
 
       const code = await proc.exited;
+      clearTimeout(deadlineTimer);
       activeProcesses.delete(item.id);
+
+      if (timedOut) {
+        manager.updateItem(item.id, { status: "failed", error: "Download timed out" });
+        return;
+      }
 
       manager.loadStateSync();
       const latest = manager.getItem(item.id);
@@ -338,6 +378,7 @@ function startDownloadProcess(item: DownloadItem) {
       console.error("Erro no processo de download:", e);
       manager.updateItem(item.id, { status: "failed", error: "Download error" });
     } finally {
+      clearTimeout(deadlineTimer);
       activeProcesses.delete(item.id);
       onSlotReleased();
     }
@@ -487,7 +528,10 @@ function handleCommand(msg: { action: string; url?: string; id?: string; referer
 
     const proc = activeProcesses.get(msg.id);
     if (proc) {
-      proc.kill(9);
+      killProcessGroup(proc.pid, "TERM");
+      setTimeout(() => {
+        killProcessGroup(proc.pid, "KILL");
+      }, 1000);
       activeProcesses.delete(msg.id);
       onSlotReleased();
     }
@@ -524,7 +568,7 @@ function gracefulShutdown() {
       clearInterval(timer);
     }
     for (const [id, proc] of activeProcesses.entries()) {
-      try { proc.kill(15); } catch {}
+      try { killProcessGroup(proc.pid, "TERM"); } catch {}
     }
     server.stop();
     cleanStagingDir();
