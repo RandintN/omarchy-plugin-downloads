@@ -5,7 +5,7 @@ A self-contained native `yt-dlp` download manager and Quickshell bar widget for 
 ## Features
 
 - **High-Performance Backend (`Bun`):** Asynchronous download daemon supporting concurrency pooling (max 3 active downloads, overflow queued), surgical process cancellation, and atomic state persistence with strict permissions (`0600`).
-- **RAM Thumbnail Caching (`tmpfs`):** Automatic preview generation stored in `/tmp/<user>/omarchy-thumbnails/` (permission `0700`), avoiding SSD wear and ensuring automatic cleanup on reboot.
+- **RAM Thumbnail Caching (`tmpfs`):** Automatic preview generation stored in `$XDG_RUNTIME_DIR/omarchy-thumbnails/` (permission `0700`), avoiding SSD wear and ensuring automatic cleanup on reboot.
 - **Native Browser Integration:** Chromium / Brave extension support via Native Messaging Host (`omarchy-chromium-ytdlp-host`) with SSRF protection and URL validation.
 - **Quickshell UI:** Dynamic bar widget (`BarWidget.qml`) that stays visible during active downloads or for 1 hour after completion/failure for quick review, featuring a full floating panel (`Panel.qml`) with progress, queue, and action buttons.
 - **CLI Client (`omarchy-download-manager`):** Full command-line control for terminal users.
@@ -61,7 +61,7 @@ Empirical benchmark executing a stress test of 30 concurrent simulated downloads
 | **Post-Run Settled RSS** | 34.3 MB | Reclaimed automatically via `Bun.gc(true)` upon queue drain |
 | **SSD Physical Writes** | 5.82 MB | Cumulative `write_bytes` across all 30 items (~198 KB per download) |
 | **Write Syscalls (`syscw`)** | 1,557 | Average of 51 atomic writes per full download lifecycle |
-| **Staging & Thumbnails** | 0 MB SSD wear | Temporary video chunks and thumbnails operate in `tmpfs` (`/tmp`) |
+| **Staging & Thumbnails** | 0 MB SSD wear | Temporary video chunks and thumbnails operate in `tmpfs` (`$XDG_RUNTIME_DIR`) |
 
 ## Removing
 
