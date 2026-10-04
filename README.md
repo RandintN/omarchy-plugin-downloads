@@ -6,7 +6,7 @@ A self-contained native `yt-dlp` download manager and Quickshell bar widget for 
 
 - **High-Performance Backend (`Bun`):** Asynchronous download daemon supporting concurrency pooling (max 3 active downloads, overflow queued), surgical process cancellation, and atomic state persistence with strict permissions (`0600`).
 - **RAM Thumbnail Caching (`tmpfs`):** Automatic preview generation stored in `$XDG_RUNTIME_DIR/omarchy-thumbnails/` (permission `0700`), avoiding SSD wear and ensuring automatic cleanup on reboot.
-- **Native Browser Integration:** Chromium / Brave extension support via Native Messaging Host (`omarchy-chromium-ytdlp-host`) with SSRF protection and URL validation.
+- **Native Browser Integration:** Chromium / Brave extension support with weighted DOM media disambiguation (prioritizing long-duration main content over short advertisement videos and banners) via Native Messaging Host (`omarchy-chromium-ytdlp-host`) with SSRF protection and URL validation.
 - **Quickshell UI:** Dynamic bar widget (`BarWidget.qml`) that stays visible during active downloads or for 1 hour after completion/failure for quick review, featuring a full floating panel (`Panel.qml`) with progress, queue, and action buttons.
 - **CLI Client (`omarchy-download-manager`):** Full command-line control for terminal users.
 - **Systemd Integration:** Managed user service (`omarchy-download-manager.service`) ensuring reliable background execution.

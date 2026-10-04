@@ -1,80 +1,242 @@
-import { expect, test, describe, beforeEach, afterEach } from "bun:test";
-import { unlinkSync, existsSync } from "node:fs";
+/**
+ * Suíte TDD do Omarchy yt-dlp Download Manager (core de estado).
+ *
+ * Execução:
+ *   bun test /home/robson/omarchy-ytdlp-src/download-manager.test.ts
+ *
+ * Cobre: isGenericStreamTitle, addDownload (incl. dedup), updateItem,
+ * removeItem, clearCompleted, cancelDownload e persistência atômica.
+ */
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DownloadManager, isGenericStreamTitle } from "./download-manager-core";
+import {
+  DownloadManager,
+  isGenericStreamTitle,
+  type DownloadItem
+} from "./download-manager-core";
 
-const TEST_STATE_FILE = join("/tmp", `test-downloads-${Date.now()}-${Math.random().toString(36).substring(2, 6)}.json`);
+let stateDir: string;
+let stateFile: string;
 
-describe("Download Manager Core", () => {
-  let manager: DownloadManager;
+function newManager(): DownloadManager {
+  // Trava o estado em um arquivo limpo por teste
+  if (existsSync(stateFile)) rmSync(stateFile);
+  return new DownloadManager(stateFile);
+}
 
-  beforeEach(() => {
-    manager = new DownloadManager(TEST_STATE_FILE);
-  });
+beforeAll(() => {
+  stateDir = mkdtempSync(join(tmpdir(), "omarchy-dl-test-"));
+  stateFile = join(stateDir, "downloads.json");
+});
 
-  afterEach(() => {
-    if (existsSync(TEST_STATE_FILE)) {
-      try { unlinkSync(TEST_STATE_FILE); } catch {}
+afterAll(() => {
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+describe("isGenericStreamTitle", () => {
+  test("rejeita títulos genéricos exatos", () => {
+    for (const t of ["master", "index", "playlist", "video", "stream", "manifest", "Checking video...", "Downloading video...", "Downloaded video"]) {
+      expect(isGenericStreamTitle(t)).toBe(true);
     }
   });
 
-  test("isGenericStreamTitle detects generic stream titles correctly", () => {
-    expect(isGenericStreamTitle("master")).toBe(true);
-    expect(isGenericStreamTitle("index.m3u8")).toBe(true);
-    expect(isGenericStreamTitle("video")).toBe(true);
-    expect(isGenericStreamTitle("checking video...")).toBe(true);
-    expect(isGenericStreamTitle("My Awesome Video")).toBe(false);
-    expect(isGenericStreamTitle("How to code in TypeScript")).toBe(false);
+  test("rejeita variações com extensão/sufixo", () => {
+    expect(isGenericStreamTitle("master.m3u8")).toBe(true);
+    expect(isGenericStreamTitle("MANIFEST")).toBe(true);
+    expect(isGenericStreamTitle("stream.mp4")).toBe(true);
   });
 
-  test("addDownload creates a new queued item", () => {
-    const id = manager.addDownload("https://example.com/video.mp4", "Example Title");
-    expect(id).toBeDefined();
-
-    const item = manager.getItem(id);
-    expect(item).toBeDefined();
-    expect(item?.url).toBe("https://example.com/video.mp4");
-    expect(item?.title).toBe("Example Title");
-    expect(item?.status).toBe("queued");
-    expect(item?.percent).toBe(0);
+  test("aceita títulos reais", () => {
+    expect(isGenericStreamTitle("Alice in the Dream Prison 1")).toBe(false);
+    expect(isGenericStreamTitle("Video game review #12")).toBe(false);
   });
 
-  test("addDownload deduplicates rapid identical calls", () => {
-    const id1 = manager.addDownload("https://example.com/video.mp4", "Example Title");
-    const id2 = manager.addDownload("https://example.com/video.mp4", "Example Title");
-    expect(id1).toBe(id2);
+  test("trata vazio/undefined como genérico", () => {
+    expect(isGenericStreamTitle("")).toBe(true);
+    expect(isGenericStreamTitle(undefined)).toBe(true);
+  });
+});
+
+describe("addDownload", () => {
+  test("cria item com campos padrão", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/video1");
+    const item = m.getItem(id)!;
+    expect(item.url).toBe("https://example.com/video1");
+    expect(item.title).toBe("Checking video...");
+    expect(item.percent).toBe(0);
+    expect(item.status).toBe("queued");
+    expect(item.addedAt).toBeGreaterThan(0);
   });
 
-  test("updateItem updates percent and status", () => {
-    const id = manager.addDownload("https://example.com/video2.mp4", "Video 2");
-    manager.updateItem(id, { percent: 50, status: "downloading" });
-
-    const item = manager.getItem(id);
-    expect(item?.percent).toBe(50);
-    expect(item?.status).toBe("downloading");
+  test("preserva título custom e referer", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/v", "Meu Título", "downloading", "https://ref.example.com");
+    const item = m.getItem(id)!;
+    expect(item.title).toBe("Meu Título");
+    expect(item.referer).toBe("https://ref.example.com");
+    expect(item.status).toBe("downloading");
   });
 
-  test("cancelDownload marks queued item as failed with user cancellation", () => {
-    const id = manager.addDownload("https://example.com/video3.mp4", "Video 3");
-    manager.cancelDownload(id);
-
-    const item = manager.getItem(id);
-    expect(item?.status).toBe("failed");
-    expect(item?.error).toBe("Cancelled by user");
+  test("URL simulate recebe título dedicado", () => {
+    const m = newManager();
+    const id = m.addDownload("https://simulate/video1");
+    expect(m.getItem(id)!.title).toBe("Simulated Video");
   });
 
-  test("clearCompleted removes completed and failed items", () => {
-    const id1 = manager.addDownload("https://example.com/queued.mp4", "Queued");
-    const id2 = manager.addDownload("https://example.com/done.mp4", "Done");
-    manager.updateItem(id2, { status: "completed", percent: 100 });
+  test("dedup: mesma URL em download retorne o mesmo id", () => {
+    const m = newManager();
+    const id1 = m.addDownload("https://example.com/x", undefined, "downloading");
+    const id2 = m.addDownload("https://example.com/x");
+    expect(id2).toBe(id1);
+    expect(m.getItems()).toHaveLength(1);
+  });
 
-    const id3 = manager.addDownload("https://example.com/failed.mp4", "Failed");
-    manager.cancelDownload(id3);
+  test("dedup: mesmo referer retorne o mesmo id", () => {
+    const m = newManager();
+    const id1 = m.addDownload("https://a.example.com/v", undefined, "downloading", "https://ref.example.com/page");
+    const id2 = m.addDownload("https://outro.example.com/v", undefined, "queued", "https://ref.example.com/page");
+    expect(id2).toBe(id1);
+  });
 
-    manager.clearCompleted();
+  test("dedup: item completed com arquivo existente retorne o mesmo id", () => {
+    const m = newManager();
+    const filePath = join(stateDir, "done.mp4");
+    writeFileSync(filePath, "x");
+    const id1 = m.addDownload("https://example.com/done");
+    m.updateItem(id1, { status: "completed", percent: 100, filepath: filePath });
+    const id2 = m.addDownload("https://example.com/done");
+    expect(id2).toBe(id1);
+  });
 
-    const items = manager.getItems();
-    expect(items.length).toBe(1);
-    expect(items[0].id).toBe(id1);
+  test("sem dedup: item completed antigo sem arquivo crie novo id", () => {
+    const m = newManager();
+    const id1 = m.addDownload("https://example.com/old");
+    // Backdate addedAt para escapar da janela de dedup de 5s (anti-duplo clique)
+    const oneHourAgo = Date.now() - 3600_000;
+    m.updateItem(id1, { status: "completed", percent: 100, completedAt: oneHourAgo, addedAt: oneHourAgo });
+    const id2 = m.addDownload("https://example.com/old");
+    expect(id2).not.toBe(id1);
+    expect(m.getItems()).toHaveLength(2);
+  });
+});
+
+describe("updateItem", () => {
+  test("atualiza percent e título", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/u");
+    m.updateItem(id, { percent: 42, title: "Título" });
+    const item = m.getItem(id)!;
+    expect(item.percent).toBe(42);
+    expect(item.title).toBe("Título");
+  });
+
+  test("transição para completed preenche completedAt automaticamente", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/c");
+    m.updateItem(id, { status: "completed", percent: 100 });
+    expect(m.getItem(id)!.completedAt).toBeGreaterThan(0);
+  });
+
+  test("id inexistente não quebra e não cria item", () => {
+    const m = newManager();
+    expect(() => m.updateItem("inexistente123", { percent: 10 })).not.toThrow();
+    expect(m.getItems()).toHaveLength(0);
+  });
+});
+
+describe("removeItem", () => {
+  test("remove o item do estado", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/r");
+    m.removeItem(id);
+    expect(m.getItem(id)).toBeUndefined();
+    expect(m.getItems()).toHaveLength(0);
+  });
+});
+
+describe("clearCompleted", () => {
+  test("mantém apenas downloading/queued", () => {
+    const m = newManager();
+    const a = m.addDownload("https://example.com/a", undefined, "downloading");
+    const b = m.addDownload("https://example.com/b", undefined, "queued");
+    const c = m.addDownload("https://example.com/c");
+    m.updateItem(c, { status: "completed", percent: 100 });
+    const d = m.addDownload("https://example.com/d");
+    m.updateItem(d, { status: "failed", error: "x" });
+
+    m.clearCompleted();
+
+    const ids = m.getItems().map(i => i.id).sort();
+    expect(ids).toEqual([a, b].sort());
+  });
+});
+
+describe("cancelDownload", () => {
+  test("downloading → failed com 'Cancelled by user'", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/cancel", undefined, "downloading");
+    m.cancelDownload(id);
+    const item = m.getItem(id)!;
+    expect(item.status).toBe("failed");
+    expect(item.error).toBe("Cancelled by user");
+  });
+
+  test("item completed não é alterado", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/keep");
+    m.updateItem(id, { status: "completed", percent: 100 });
+    m.cancelDownload(id);
+    expect(m.getItem(id)!.status).toBe("completed");
+  });
+});
+
+describe("persistência atômica", () => {
+  test("arquivo de estado é criado com permissão 0600", () => {
+    const m = newManager();
+    m.addDownload("https://example.com/perm");
+    const mode = statSync(stateFile).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  test("não deixa arquivos .tmp órfãos após salvar", () => {
+    const m = newManager();
+    m.addDownload("https://example.com/t1");
+    m.addDownload("https://example.com/t2");
+    m.updateItem(m.getItems()[0].id, { percent: 50 });
+    const orphans = readdirSync(stateDir).filter(f => f.includes(".tmp."));
+    expect(orphans).toHaveLength(0);
+  });
+
+  test("estado sobrevive a nova instância (round-trip)", () => {
+    const m1 = newManager();
+    const id = m1.addDownload("https://example.com/rt", "Persistido", "downloading");
+    m1.updateItem(id, { percent: 77 });
+
+    const m2 = new DownloadManager(stateFile);
+    const item = m2.getItem(id)!;
+    expect(item.percent).toBe(77);
+    expect(item.title).toBe("Persistido");
+    expect(item.status).toBe("downloading");
+  });
+
+  test("JSON corrompido preserva estado em memória e cria backup .corrupt.bak", () => {
+    const m = newManager();
+    const id = m.addDownload("https://example.com/corrupt");
+    writeFileSync(stateFile, "{não é json válido");
+
+    // loadStateSync não deve lançar
+    expect(() => m.loadStateSync()).not.toThrow();
+    // item continua acessível em memória
+    expect(m.getItem(id)).toBeDefined();
+    // backup da versão corrompida foi criado
+    expect(existsSync(`${stateFile}.corrupt.bak`)).toBe(true);
+  });
+
+  test("estado vazio/ausente carrega lista vazia", () => {
+    const m = newManager();
+    expect(m.getItems()).toHaveLength(0);
   });
 });

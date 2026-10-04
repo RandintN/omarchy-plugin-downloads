@@ -7,6 +7,7 @@ USER_SHARE="$HOME/.local/share/omarchy/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 CHROME_NATIVE_DIR="$HOME/.config/chromium/NativeMessagingHosts"
 BRAVE_NATIVE_DIR="$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+USER_EXT_DIR="$HOME/.local/share/omarchy/extensions/yt-dlp"
 
 echo "=== Installing Omarchy Downloads Backend ==="
 
@@ -51,6 +52,13 @@ sed "s|ExecStart=.*|ExecStart=$BUN_PATH run $USER_SHARE/omarchy-download-daemon|
 systemctl --user daemon-reload
 systemctl --user enable omarchy-download-manager.service
 systemctl --user restart omarchy-download-manager.service
+
+# 7. Install browser extension
+if [ -d "$PLUGIN_DIR/extension" ]; then
+  echo "Installing browser extension..."
+  mkdir -p "$USER_EXT_DIR"
+  cp -r "$PLUGIN_DIR/extension/"* "$USER_EXT_DIR/"
+fi
 
 echo "=== Installation Completed Successfully! ==="
 echo "The daemon has been started and the Quickshell plugin is ready for use."
