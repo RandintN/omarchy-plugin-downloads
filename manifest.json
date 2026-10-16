@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "robson.downloads",
   "name": "Downloads",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Robson",
   "license": "MIT",
   "description": "Gerenciador de downloads yt-dlp autocontido com daemon Bun, Systemd e widget Quickshell.",
