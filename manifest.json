@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "robson.downloads",
   "name": "Downloads",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Robson",
   "license": "MIT",
-  "description": "Gerenciador de downloads yt-dlp autocontido com daemon Bun, Systemd e widget Quickshell.",
+  "description": "Self-contained yt-dlp download manager with a Bun daemon, Systemd service, and Quickshell bar widget. • Concurrent downloads via an async Bun daemon (pool of 3, overflow queued) • Native Chromium and Brave integration with weighted media detection that skips ads • RAM-cached thumbnails in tmpfs, no SSD wear • Quickshell widget with live progress, queue, cancel and clear • CLI client for full terminal control • Systemd user service for reliable background downloads",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
