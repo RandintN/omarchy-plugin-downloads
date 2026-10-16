@@ -63,8 +63,10 @@ function isValidUrl(rawUrl: string): boolean {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
     const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    // Bloqueia loopback/privados, incluindo IPv4-mapped IPv6 (::ffff:127.x, ::ffff:0.x)
-    const blocked = /^(localhost|127\.[0-9.]+|10\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|192\.168\.[0-9.]+|169\.254\.[0-9.]+|0\.0\.0\.0|::1|::ffff:(127|0)\.[0-9.]+)$/;
+    // Bloqueia loopback/privados, incluindo IPv4-mapped IPv6 (::ffff:*).
+    // A normalização WHATWG serializa o IPv4-mapped em hex (::ffff:127.0.0.1 vira
+    // ::ffff:7f00:1), então o prefixo ::ffff: é bloqueado por inteiro.
+    const blocked = /^(localhost|127\.[0-9.]+|10\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|192\.168\.[0-9.]+|169\.254\.[0-9.]+|0\.0\.0\.0|::|::1|::ffff:.*|fe80::.*|fc00::.*)$/;
     return !blocked.test(hostname);
   } catch {
     return false;
@@ -97,6 +99,13 @@ function cleanStagingDir() {
       }
     } catch {}
   }
+}
+
+function cleanupThumbnail(id: string) {
+  try {
+    const thumb = join(THUMBNAILS_DIR, `${id}.jpg`);
+    if (existsSync(thumb)) unlinkSync(thumb);
+  } catch {}
 }
 
 function onSlotReleased() {
@@ -506,9 +515,17 @@ function handleCommand(msg: { action: string; url?: string; id?: string; referer
   } else if (msg.action === "remove" && typeof msg.id === "string") {
     if (!VALID_ID_REGEX.test(msg.id)) return;
     notifiedCompletions.delete(msg.id);
+    cleanupThumbnail(msg.id);
     manager.removeItem(msg.id);
   } else if (msg.action === "clear") {
     notifiedCompletions.clear();
+    // Remove thumbnails dos itens concluídos/falhos antes de limpá-los do estado
+    manager.loadStateSync();
+    for (const item of manager.getItems()) {
+      if (item.status === "completed" || item.status === "failed") {
+        cleanupThumbnail(item.id);
+      }
+    }
     manager.clearCompleted();
     if (typeof Bun.gc === "function") {
       Bun.gc(true);

@@ -20,7 +20,9 @@ for cmd in bun yt-dlp ffmpeg; do
 done
 
 # 2. Detect bun path
-BUN_PATH=$(which bun)
+# Resolve o caminho real (versão concreta) em vez do symlink 'latest', para
+# que o serviço não mude de runtime silenciosamente num upgrade do bun.
+BUN_PATH=$(readlink -f "$(which bun)")
 echo "Bun detected at: $BUN_PATH"
 
 # 3. Create required directories
